@@ -31,7 +31,7 @@ grid_points = [
 ]
 
 EARTH_RADIUS = 6378.1
-RADIUS_KM = 3
+RADIUS_KM = 50
 RADIUS_RAD = RADIUS_KM / EARTH_RADIUS
 
 results = []
