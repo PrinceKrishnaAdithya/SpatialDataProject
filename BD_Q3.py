@@ -28,15 +28,28 @@ grid_points = [
     [76.94, 11.04], [76.96, 11.04], [76.98, 11.04], [77.00, 11.04],
 ]
 
-EARTH_RADIUS_KM = 6378.1
-RADIUS_KM = 5
-RADIUS_RAD = RADIUS_KM / EARTH_RADIUS_KM
-
-
 from shapely.geometry import shape, Point
 
+# ... keep your imports and connection ...
+
+RADIUS_KM = 50       # ← most important change: 3–10 km is realistic for black-spot detection
+RADIUS_RAD = RADIUS_KM / 6378.1
+
+# Expand grid toward more rural/suburban areas around Coimbatore
+grid_points = []
+center_lon, center_lat = 76.95, 11.00
+spacing = 0.15          # ~16–17 km steps — cover city → fringe → rural
+
+for i in range(-5, 6):
+    for j in range(-5, 6):
+        lon = round(center_lon + j * spacing, 4)
+        lat = round(center_lat + i * spacing, 4)
+        grid_points.append([lon, lat])
+
+print(f"Scanning {len(grid_points)} grid points...")
 
 blackspots = []
+stats = []   # for debugging
 
 for p in grid_points:
     r = residential.count_documents({
@@ -46,7 +59,19 @@ for p in grid_points:
         "geometry": {"$geoWithin": {"$centerSphere": [p, RADIUS_RAD]}}
     })
 
-    if r > 0 and t == 0:
-        blackspots.append(p)
+    stats.append({"center": p, "res": r, "towers": t})
 
-blackspots
+    if r > 0 and t == 0:
+        blackspots.append({
+            "location": p,
+            "residential_count": r,
+            "note": "potential black spot"
+        })
+
+print("\nFound black spots:", blackspots)
+
+# Show some diagnostic output
+print("\nSample results (sorted by residential descending):")
+stats.sort(key=lambda x: x["res"], reverse=True)
+for item in stats[:8]:
+    print(f"{item['center']} → towers = {item['towers']}")
