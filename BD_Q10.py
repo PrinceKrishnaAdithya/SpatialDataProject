@@ -4,52 +4,96 @@
 Identify regions where telecom networks may face congestion.
 
 🧠 Concept
-TNSI = Residential / Towers
+TNSI = Residential settlements served per tower
+
+Higher value → Tower congestion risk
 """
 
 from pymongo import MongoClient
-from urllib.parse import quote_plus
+from math import radians, cos, sin, sqrt, atan2
+import folium
 
-
-uri = "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/"
-client = MongoClient(uri)
-
+# ======================================================
+# CONNECT DATABASE
+# ======================================================
+client = MongoClient(
+ "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/"
+)
 db = client["BigData_Spatial"]
 
-residential = db.residential_clean
-towers = db.towers_clean
+population = db.population_points
+towers_col = db.towers_clean
 
-states = db.states_clean          # District polygons
-towers = db.towers_clean          # Telecom tower points
-res    = db.residential_clean     # Residential points
+print("Loading data...")
 
+settlements = [p["geometry"]["coordinates"] for p in population.find()]
+towers = [t["geometry"]["coordinates"] for t in towers_col.find()]
 
-grid_points = [
-    [76.94, 11.00], [76.96, 11.00], [76.98, 11.00], [77.00, 11.00],
-    [76.94, 11.02], [76.96, 11.02], [76.98, 11.02], [77.00, 11.02],
-    [76.94, 11.04], [76.96, 11.04], [76.98, 11.04], [77.00, 11.04],
+print("Settlements:", len(settlements))
+print("Towers:", len(towers))
+
+# ======================================================
+# HAVERSINE DISTANCE
+# ======================================================
+def distance_km(a, b):
+    lon1, lat1 = a
+    lon2, lat2 = b
+    
+    R = 6371
+    dlon = radians(lon2 - lon1)
+    dlat = radians(lat2 - lat1)
+    
+    aa = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
+    c = 2 * atan2(sqrt(aa), sqrt(1-aa))
+    return R * c
+
+# ======================================================
+# FIND NEAREST TOWER FOR EACH SETTLEMENT
+# ======================================================
+print("Assigning settlements to nearest towers...")
+
+tower_load = {tuple(t):0 for t in towers}
+
+for s in settlements:
+    nearest = min(towers, key=lambda t: distance_km(s,t))
+    tower_load[tuple(nearest)] += 1
+
+# ======================================================
+# COMPUTE TNSI PER TOWER
+# ======================================================
+results = [
+    {"tower": list(k), "TNSI": v}
+    for k,v in tower_load.items()
 ]
 
-EARTH_RADIUS_KM = 6378.1
-RADIUS_KM = 5
-RADIUS_RAD = RADIUS_KM / EARTH_RADIUS_KM
-
-
-from shapely.geometry import shape, Point
-
-results = []
-
-for p in grid_points:
-    r = residential.count_documents({
-        "geometry": {"$geoWithin": {"$centerSphere": [p, RADIUS_RAD]}}
-    })
-    t = towers.count_documents({
-        "geometry": {"$geoWithin": {"$centerSphere": [p, RADIUS_RAD]}}
-    })
-
-    if t > 0:
-        tnsi = r / t
-        results.append({"center": p, "TNSI": round(tnsi, 2)})
-
 results.sort(key=lambda x: x["TNSI"], reverse=True)
-print(results[0])
+
+print("\n🔥 MOST STRESSED TOWERS:")
+for r in results[:10]:
+    print(r)
+
+# ======================================================
+# MAP VISUALIZATION
+# ======================================================
+m = folium.Map(location=[11,78], zoom_start=7)
+
+# 🔴 HIGH CONGESTION towers
+for r in results[:80]:
+    folium.CircleMarker(
+        location=[r["tower"][1], r["tower"][0]],
+        radius=8,
+        color="red",
+        fill=True,
+        popup=f"TNSI: {r['TNSI']}"
+    ).add_to(m)
+
+# 🟢 LOW LOAD towers
+for r in results[-80:]:
+    folium.CircleMarker(
+        location=[r["tower"][1], r["tower"][0]],
+        radius=4,
+        color="green",
+        fill=True
+    ).add_to(m)
+
+m
