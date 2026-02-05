@@ -1,77 +1,109 @@
 """
 🌍 Question 3: Telecom Black-Spot Index (TBI)
+
 📌 Problem Statement
-Identify regions with residential presence but zero telecom towers.
+Find locations inside Tamil Nadu where people live
+but no telecom tower exists nearby.
+
+Black Spot = Residential > 0 AND Towers == 0 (within 30km)
 """
 
-
+# ==========================================================
+# 1️⃣ IMPORT LIBRARIES
+# ==========================================================
 from pymongo import MongoClient
-from urllib.parse import quote_plus
-
-
-uri = "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/"
-client = MongoClient(uri)
-
-db = client["BigData_Spatial"]
-
-residential = db.residential_clean
-towers = db.towers_clean
-
-states = db.states_clean          # District polygons
-towers = db.towers_clean          # Telecom tower points
-res    = db.residential_clean     # Residential points
-
-
-grid_points = [
-    [76.94, 11.00], [76.96, 11.00], [76.98, 11.00], [77.00, 11.00],
-    [76.94, 11.02], [76.96, 11.02], [76.98, 11.02], [77.00, 11.02],
-    [76.94, 11.04], [76.96, 11.04], [76.98, 11.04], [77.00, 11.04],
-]
-
+import numpy as np
 from shapely.geometry import shape, Point
 
-# ... keep your imports and connection ...
+# ==========================================================
+# 2️⃣ CONNECT TO MONGODB
+# ==========================================================
+client = MongoClient(
+    "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/"
+)
+db = client["BigData_Spatial"]
 
-RADIUS_KM = 50       # ← most important change: 3–10 km is realistic for black-spot detection
-RADIUS_RAD = RADIUS_KM / 6378.1
+states = db.states_clean
+towers = db.towers_points
+residential = db.residential_points
 
-# Expand grid toward more rural/suburban areas around Coimbatore
+# ==========================================================
+# 3️⃣ GET TAMIL NADU POLYGON
+# ==========================================================
+tn_doc = states.find_one({"st_nm": "Tamil Nadu"})
+tn_polygon = shape(tn_doc["geometry"])
+
+minx, miny, maxx, maxy = tn_polygon.bounds
+
+# ==========================================================
+# 4️⃣ AUTO CREATE GRID ACROSS WHOLE STATE
+# ==========================================================
 grid_points = []
-center_lon, center_lat = 76.95, 11.00
-spacing = 0.15          # ~16–17 km steps — cover city → fringe → rural
+step = 0.35   # ~40km grid spacing
 
-for i in range(-5, 6):
-    for j in range(-5, 6):
-        lon = round(center_lon + j * spacing, 4)
-        lat = round(center_lat + i * spacing, 4)
-        grid_points.append([lon, lat])
+for x in np.arange(minx, maxx, step):
+    for y in np.arange(miny, maxy, step):
+        if tn_polygon.contains(Point(x, y)):
+            grid_points.append([x, y])
 
-print(f"Scanning {len(grid_points)} grid points...")
+print("Grid cells scanned:", len(grid_points))
+
+# ==========================================================
+# 5️⃣ FIND BLACK SPOTS
+# ==========================================================
+EARTH_RADIUS = 6378.1
+RADIUS_KM = 30
+RADIUS_RAD = RADIUS_KM / EARTH_RADIUS
 
 blackspots = []
-stats = []   # for debugging
+all_results = []
 
 for p in grid_points:
-    r = residential.count_documents({
-        "geometry": {"$geoWithin": {"$centerSphere": [p, RADIUS_RAD]}}
-    })
-    t = towers.count_documents({
+
+    res_count = residential.count_documents({
         "geometry": {"$geoWithin": {"$centerSphere": [p, RADIUS_RAD]}}
     })
 
-    stats.append({"center": p, "res": r, "towers": t})
+    tower_count = towers.count_documents({
+        "geometry": {"$geoWithin": {"$centerSphere": [p, RADIUS_RAD]}}
+    })
 
-    if r > 0 and t == 0:
+    all_results.append({
+        "center": p,
+        "residential": res_count,
+        "towers": tower_count
+    })
+
+    if res_count > 0 and tower_count == 0:
         blackspots.append({
-            "location": p,
-            "residential_count": r,
-            "note": "potential black spot"
+            "center": p,
+            "residential": res_count
         })
 
-print("\nFound black spots:", blackspots)
+print("\n🚨 BLACK SPOTS FOUND:", len(blackspots))
+print("Top Black Spots:", blackspots[:5])
+# ==========================================================
+# 6️⃣ VISUALISE BLACK SPOTS ON MAP
+# ==========================================================
+import folium
 
-# Show some diagnostic output
-print("\nSample results (sorted by residential descending):")
-stats.sort(key=lambda x: x["res"], reverse=True)
-for item in stats[:8]:
-    print(f"{item['center']} → towers = {item['towers']}")
+m = folium.Map(location=[11,78], zoom_start=7)
+
+# Plot residential density heatmap
+from folium.plugins import HeatMap
+
+heat_data = [
+    [r["center"][1], r["center"][0], r["residential"]]
+    for r in all_results if r["residential"] > 0
+]
+HeatMap(heat_data, radius=20).add_to(m)
+
+# 🚨 Mark BLACK SPOTS
+for b in blackspots:
+    folium.Marker(
+        location=[b["center"][1], b["center"][0]],
+        icon=folium.Icon(color="black", icon="remove"),
+        popup=f"BLACK SPOT<br>Homes nearby: {b['residential']}"
+    ).add_to(m)
+
+m
