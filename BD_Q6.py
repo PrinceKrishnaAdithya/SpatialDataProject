@@ -5,48 +5,112 @@ Identify areas with poor telecom redundancy.
 
 🧠 Concept
 TRRI = 1 / (Towers + 1)
+
+High TRRI → Very few towers nearby
+→ Network failure risk if a tower goes down
 """
 
-
 from pymongo import MongoClient
-from urllib.parse import quote_plus
+from math import radians, cos, sin, sqrt, atan2
+import folium
 
-
-uri = "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/"
-client = MongoClient(uri)
-
+# ======================================================
+# CONNECT DATABASE
+# ======================================================
+client = MongoClient(
+ "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/"
+)
 db = client["BigData_Spatial"]
 
-residential = db.residential_clean
-towers = db.towers_clean
+towers_col = db.towers_clean
 
-states = db.states_clean          # District polygons
-towers = db.towers_clean          # Telecom tower points
-res    = db.residential_clean     # Residential points
+print("Loading tower data...")
+towers = [t["geometry"]["coordinates"] for t in towers_col.find()]
+print("Total towers:", len(towers))
 
+# ======================================================
+# HAVERSINE DISTANCE
+# ======================================================
+def distance_km(a, b):
+    lon1, lat1 = a
+    lon2, lat2 = b
+    
+    R = 6371
+    dlon = radians(lon2 - lon1)
+    dlat = radians(lat2 - lat1)
+    
+    aa = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
+    c = 2 * atan2(sqrt(aa), sqrt(1-aa))
+    return R * c
 
-grid_points = [
-    [76.94, 11.00], [76.96, 11.00], [76.98, 11.00], [77.00, 11.00],
-    [76.94, 11.02], [76.96, 11.02], [76.98, 11.02], [77.00, 11.02],
-    [76.94, 11.04], [76.96, 11.04], [76.98, 11.04], [77.00, 11.04],
-]
+# ======================================================
+# CREATE 30km GRID OVER TAMIL NADU
+# ======================================================
+print("Creating redundancy grid...")
 
-EARTH_RADIUS_KM = 6378.1
-RADIUS_KM = 5
-RADIUS_RAD = RADIUS_KM / EARTH_RADIUS_KM
+grid = []
+lon_start, lon_end = 76.0, 80.5
+lat_start, lat_end = 8.0, 13.5
+step = 0.30  # ≈30 km
 
+lat = lat_start
+while lat <= lat_end:
+    lon = lon_start
+    while lon <= lon_end:
+        grid.append([lon, lat])
+        lon += step
+    lat += step
 
-from shapely.geometry import shape, Point
+print("Grid cells:", len(grid))
 
+# ======================================================
+# COMPUTE TRRI
+# ======================================================
+RADIUS_KM = 30
 results = []
 
-for p in grid_points:
-    t = towers.count_documents({
-        "geometry": {"$geoWithin": {"$centerSphere": [p, RADIUS_RAD]}}
+for cell in grid:
+
+    nearby_towers = sum(
+        1 for t in towers
+        if distance_km(cell, t) <= RADIUS_KM
+    )
+
+    trri = 1 / (nearby_towers + 1)
+
+    results.append({
+        "center": cell,
+        "TRRI": trri
     })
 
-    trri = 1 / (t + 1)
-    results.append({"center": p, "TRRI": round(trri, 2)})
-
 results.sort(key=lambda x: x["TRRI"], reverse=True)
-print(results[0])
+
+print("\n⚠️ HIGHEST REDUNDANCY RISK ZONES:")
+for r in results[:10]:
+    print(r)
+
+# ======================================================
+# MAP VISUALIZATION
+# ======================================================
+m = folium.Map(location=[11,78], zoom_start=7)
+
+# 🟠 High risk (few towers nearby)
+for r in results[:120]:
+    folium.CircleMarker(
+        location=[r["center"][1], r["center"][0]],
+        radius=6,
+        color="orange",
+        fill=True,
+        popup=f"TRRI: {round(r['TRRI'],3)}"
+    ).add_to(m)
+
+# 🔵 Low risk (good redundancy)
+for r in results[-120:]:
+    folium.CircleMarker(
+        location=[r["center"][1], r["center"][0]],
+        radius=3,
+        color="blue",
+        fill=True
+    ).add_to(m)
+
+m
