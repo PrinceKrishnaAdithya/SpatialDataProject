@@ -1,58 +1,69 @@
-"""
-🌍 Question 1: Telecom Coverage Vulnerability Index (TCVI)
-📌 Problem Statement
+# ==========================================================
+# CREATE INTERACTIVE MAP
+# ==========================================================
+import folium
+from folium.plugins import HeatMap
+from IPython.display import display
 
-Identify regions with high residential exposure but low telecom tower availability.
+m = folium.Map(location=[11.1, 77.2], zoom_start=7)
 
-🧠 Concept & Explanation
+def get_color(score):
+    if score > 1000:
+        return "red"
+    elif score > 500:
+        return "orange"
+    elif score > 200:
+        return "yellow"
+    else:
+        return "green"
 
-Telecom vulnerability increases when:
-• Residential density is high
-• Nearby telecom towers are few
+# -----------------------------
+# 1️⃣ Add grid markers
+# -----------------------------
+for r in results:
+    lat = r["center"][1]
+    lon = r["center"][0]
 
-TCVI =
-(1.5 × Residential Points)
-− (1.0 × Telecom Towers)
-"""
+    folium.CircleMarker(
+        location=[lat, lon],
+        radius=8,
+        color=get_color(r["TCVI"]),
+        fill=True,
+        fill_opacity=0.7,
+        popup=(
+            f"<b>TCVI:</b> {r['TCVI']}<br>"
+            f"Residential: {r['residential']}<br>"
+            f"Towers: {r['towers']}"
+        )
+    ).add_to(m)
 
-from pymongo import MongoClient
+# -----------------------------
+# 2️⃣ Add heatmap layer
+# -----------------------------
+heat_data = [[r["center"][1], r["center"][0], r["TCVI"]] for r in results]
+HeatMap(heat_data, radius=25).add_to(m)
 
-client = MongoClient("mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/")
-db = client["BigData_Spatial"]
+# -----------------------------
+# 3️⃣ ⭐ Highlight TOP 5 High-Risk Areas
+# -----------------------------
+top5 = results[:5]
 
-res = db.residential_clean
-towers = db.towers_clean
+for r in top5:
+    lat = r["center"][1]
+    lon = r["center"][0]
 
-grid_points = [
-    [77.0, 11.0],
-    [77.1, 11.0],
-    [77.0, 11.1],
-    [77.1, 11.1]
-]
+    folium.Marker(
+        location=[lat, lon],
+        icon=folium.Icon(color="red", icon="star"),
+        popup=(
+            f"<h4>⚠ HIGH TELECOM VULNERABILITY</h4>"
+            f"TCVI Score: {r['TCVI']}<br>"
+            f"Residential: {r['residential']}<br>"
+            f"Towers: {r['towers']}"
+        )
+    ).add_to(m)
 
-EARTH_RADIUS = 6378.1
-RADIUS_KM = 50
-RADIUS_RAD = RADIUS_KM / EARTH_RADIUS
-
-results = []
-
-for p in grid_points:
-    r_count = res.count_documents({
-        "geometry": {"$geoWithin": {"$centerSphere": [p, RADIUS_RAD]}}
-    })
-
-    t_count = towers.count_documents({
-        "geometry": {"$geoWithin": {"$centerSphere": [p, RADIUS_RAD]}}
-    })
-
-    tcvi = (1.5 * r_count) - (1.0 * t_count)
-
-    results.append({
-        "center": p,
-        "residential": r_count,
-        "towers": t_count,
-        "TCVI": round(tcvi, 2)
-    })
-
-results.sort(key=lambda x: x["TCVI"], reverse=True)
-print(results[0])
+# -----------------------------
+# 4️⃣ Show map inline
+# -----------------------------
+display(m)
