@@ -10,86 +10,95 @@ High value → Many people + Few towers
 → High risk during disasters (floods, earthquakes, cyclones)
 """
 
+
+# ======================================================
+# 1️⃣ IMPORTS
+# ======================================================
 from pymongo import MongoClient
-from math import radians, cos, sin, sqrt, atan2
+import numpy as np
+from shapely.geometry import shape, Point
 import folium
 
 # ======================================================
-# CONNECT DATABASE
+# 2️⃣ CONNECT TO MONGODB ATLAS
 # ======================================================
-client = MongoClient(
- "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/"
+MONGO_URI = "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/?retryWrites=true&w=majority"
+
+client = MongoClient(MONGO_URI)
+db = client["MongoDB"]
+
+states = db.states_clean_fixed
+population = db.population_points_fixed
+towers_col = db.towers_clean_fixed
+
+print("✅ Connected to MongoDB Atlas")
+
+# ======================================================
+# 3️⃣ LOAD TAMIL NADU POLYGON
+# ======================================================
+tn_doc = states.find_one({"properties.st_nm": "Tamil Nadu"})
+tn_geojson = tn_doc["geometry"]
+tn_polygon = shape(tn_geojson)
+
+minx, miny, maxx, maxy = tn_polygon.bounds
+print("✅ Tamil Nadu boundary loaded")
+
+# ======================================================
+# 4️⃣ LOAD DATA ONCE (FAST)
+# ======================================================
+print("Loading settlements and towers...")
+
+settlements = np.array(
+    [p["geometry"]["coordinates"] for p in population.find({}, {"geometry.coordinates":1})]
 )
-db = client["BigData_Spatial"]
 
-population = db.population_points
-towers_col = db.towers_clean
-
-print("Loading data...")
-settlements = [p["geometry"]["coordinates"] for p in population.find()]
-towers = [t["geometry"]["coordinates"] for t in towers_col.find()]
+towers = np.array(
+    [t["geometry"]["coordinates"] for t in towers_col.find({}, {"geometry.coordinates":1})]
+)
 
 print("Settlements:", len(settlements))
 print("Towers:", len(towers))
 
 # ======================================================
-# HAVERSINE DISTANCE
+# 5️⃣ CREATE 30km GRID INSIDE STATE
 # ======================================================
-def distance_km(a, b):
-    lon1, lat1 = a
-    lon2, lat2 = b
-    
-    R = 6371
-    dlon = radians(lon2 - lon1)
-    dlat = radians(lat2 - lat1)
-    
-    aa = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
-    c = 2 * atan2(sqrt(aa), sqrt(1-aa))
-    return R * c
-
-# ======================================================
-# CREATE 30km GRID ACROSS TAMIL NADU
-# ======================================================
-print("Creating emergency-risk grid...")
+print("Creating emergency risk grid...")
 
 grid = []
-lon_start, lon_end = 76.0, 80.5
-lat_start, lat_end = 8.0, 13.5
-step = 0.30  # ≈30km cells
+step = 0.30  # ≈30 km
 
-lat = lat_start
-while lat <= lat_end:
-    lon = lon_start
-    while lon <= lon_end:
-        grid.append([lon, lat])
-        lon += step
-    lat += step
+for x in np.arange(minx, maxx, step):
+    for y in np.arange(miny, maxy, step):
+        if tn_polygon.contains(Point(x, y)):
+            grid.append([x, y])
 
 print("Grid cells:", len(grid))
 
 # ======================================================
-# COMPUTE ECRI
+# 6️⃣ FAST DISTANCE FUNCTION
 # ======================================================
-RADIUS_KM = 30
+def count_within_radius(points, center, radius_km):
+    dx = (points[:,0] - center[0]) * 111
+    dy = (points[:,1] - center[1]) * 111
+    dist = np.sqrt(dx**2 + dy**2)
+    return np.sum(dist <= radius_km)
+
+# ======================================================
+# 7️⃣ COMPUTE ECRI
+# ======================================================
+print("🚨 Calculating emergency communication risk...")
+
 results = []
 
 for cell in grid:
-
-    nearby_res = sum(
-        1 for s in settlements
-        if distance_km(cell, s) <= RADIUS_KM
-    )
-
-    nearby_towers = sum(
-        1 for t in towers
-        if distance_km(cell, t) <= RADIUS_KM
-    )
+    nearby_res = count_within_radius(settlements, cell, 30)
+    nearby_towers = count_within_radius(towers, cell, 30)
 
     ecri = (2 * nearby_res) - nearby_towers
 
     results.append({
-        "center": cell,
-        "ECRI": ecri
+        "center": [float(cell[0]), float(cell[1])],
+        "ECRI": int(ecri)
     })
 
 results.sort(key=lambda x: x["ECRI"], reverse=True)
@@ -99,11 +108,19 @@ for r in results[:10]:
     print(r)
 
 # ======================================================
-# MAP VISUALIZATION
+# 8️⃣ MAP VISUALISATION
 # ======================================================
+print("Creating map...")
+
 m = folium.Map(location=[11,78], zoom_start=7)
 
-# 🔴 High emergency risk
+# Tamil Nadu boundary
+folium.GeoJson(
+    tn_geojson,
+    style_function=lambda x: {"fill": False, "color": "black", "weight": 2}
+).add_to(m)
+
+# 🔴 High emergency risk zones
 for r in results[:120]:
     folium.CircleMarker(
         location=[r["center"][1], r["center"][0]],
@@ -113,7 +130,7 @@ for r in results[:120]:
         popup=f"ECRI: {r['ECRI']}"
     ).add_to(m)
 
-# 🟢 Low emergency risk
+# 🟢 Low emergency risk zones
 for r in results[-120:]:
     folium.CircleMarker(
         location=[r["center"][1], r["center"][0]],
@@ -122,4 +139,9 @@ for r in results[-120:]:
         fill=True
     ).add_to(m)
 
-m
+# ======================================================
+# 9️⃣ SAVE MAP
+# ======================================================
+m.save("Emergency_Communication_Risk_TN.html")
+print("✅ Map saved as Emergency_Communication_Risk_TN.html")
+
