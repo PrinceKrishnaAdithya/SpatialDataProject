@@ -7,6 +7,7 @@ but NO telecom towers exist nearby.
 These are true network black spots.
 """
 
+
 # ======================================================
 # 1️⃣ IMPORTS
 # ======================================================
@@ -17,86 +18,120 @@ import folium
 from folium.plugins import HeatMap
 
 # ======================================================
-# 2️⃣ CONNECT MONGODB
+# 2️⃣ CONNECT TO MONGODB ATLAS
 # ======================================================
-client = MongoClient(
- "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/"
-)
-db = client["BigData_Spatial"]
+MONGO_URI = "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/?retryWrites=true&w=majority"
 
-states = db.states_clean
-population = db.population_points
-towers = db.towers_clean
+client = MongoClient(MONGO_URI)
+db = client["MongoDB"]
+
+states = db.states_clean_fixed
+population = db.population_points_fixed
+towers = db.towers_clean_fixed
+
+print("✅ Connected to MongoDB Atlas")
 
 # ======================================================
 # 3️⃣ LOAD TAMIL NADU POLYGON
 # ======================================================
-tn_doc = states.find_one({"st_nm": "Tamil Nadu"})
-tn_polygon = shape(tn_doc["geometry"])
+tn_doc = states.find_one({"properties.st_nm": "Tamil Nadu"})
+tn_geojson = tn_doc["geometry"]
+tn_polygon = shape(tn_geojson)
 
 minx, miny, maxx, maxy = tn_polygon.bounds
+print("✅ Tamil Nadu boundary loaded")
 
 # ======================================================
-# 4️⃣ GENERATE STATE GRID
+# 4️⃣ CREATE GRID
 # ======================================================
+print("Creating grid...")
+
 grid_points = []
-step = 0.1   # slightly denser grid
+step = 0.05   # 5km grid
 
 for x in np.arange(minx, maxx, step):
     for y in np.arange(miny, maxy, step):
         if tn_polygon.contains(Point(x, y)):
             grid_points.append([x, y])
 
-print("Grid cells scanned:", len(grid_points))
+print("Grid cells:", len(grid_points))
 
 # ======================================================
-# 5️⃣ DETECT BLACKSPOTS
+# 5️⃣ LOAD ALL POINTS ONCE (FAST)
 # ======================================================
-EARTH_RADIUS = 6378.1
-RADIUS_KM = 5
-RADIUS_RAD = RADIUS_KM / EARTH_RADIUS
+print("Loading population points...")
+pop_docs = list(population.find({}, {"geometry.coordinates": 1}))
+print("Population points:", len(pop_docs))
+
+print("Loading tower points...")
+tower_docs = list(towers.find({}, {"geometry.coordinates": 1}))
+print("Tower points:", len(tower_docs))
+
+pop_points = np.array([d["geometry"]["coordinates"] for d in pop_docs])
+tower_points = np.array([d["geometry"]["coordinates"] for d in tower_docs])
+
+# ======================================================
+# 6️⃣ FAST DISTANCE FUNCTION
+# ======================================================
+def count_within_radius(points, center, radius_km):
+    dx = (points[:,0] - center[0]) * 111
+    dy = (points[:,1] - center[1]) * 111
+    dist = np.sqrt(dx**2 + dy**2)
+    return np.sum(dist <= radius_km)
+
+# ======================================================
+# 7️⃣ DETECT BLACKSPOTS
+# ======================================================
+print("🚨 Detecting telecom blackspots...")
 
 blackspots = []
 population_cells = []
 
 for p in grid_points:
 
-    pop_count = population.count_documents({
-        "geometry":{"$geoWithin":{"$centerSphere":[p,RADIUS_RAD]}}
-    })
-
-    tower_count = towers.count_documents({
-        "geometry":{"$geoWithin":{"$centerSphere":[p,RADIUS_RAD]}}
-    })
+    pop_count = count_within_radius(pop_points, p, 15)
+    tower_count = count_within_radius(tower_points, p, 15)
 
     if pop_count > 0:
-        population_cells.append([p[1], p[0], pop_count])
+        population_cells.append([float(p[1]), float(p[0]), int(pop_count)])
 
-    # 🚨 BLACKSPOT CONDITION
+
+    # BLACKSPOT CONDITION
     if pop_count > 0 and tower_count == 0:
         blackspots.append({
-            "center": p,
-            "population": pop_count
+            "center": [float(p[0]), float(p[1])],
+            "population": int(pop_count)
         })
 
 print("\n🚨 TOTAL BLACKSPOTS FOUND:", len(blackspots))
-for b in blackspots[:5]:
+for b in blackspots[:10]:
     print(b)
 
 # ======================================================
-# 6️⃣ VISUALISE ON MAP
+# 8️⃣ CREATE MAP
 # ======================================================
+print("Creating map...")
+
 m = folium.Map(location=[11,78], zoom_start=7)
 
-# Population heatmap
-HeatMap(population_cells, radius=22).add_to(m)
+# Tamil Nadu boundary
+folium.GeoJson(
+    tn_geojson,
+    style_function=lambda x: {"fill": False, "color": "black", "weight": 2}
+).add_to(m)
 
-# 🚨 Mark BLACKSPOTS
+# Population heatmap
+HeatMap(population_cells, radius=18).add_to(m)
+
+# 🚨 Blackspot markers
 for b in blackspots:
     folium.Marker(
-        location=[b["center"][1], b["center"][0]],
-        icon=folium.Icon(color="black", icon="remove"),
-        popup=f"📵 BLACKSPOT\nPopulation nearby: {b['population']}"
+        [b["center"][1], b["center"][0]],
+        icon=folium.Icon(color="black"),
+        popup=f"📵 BLACKSPOT | Population nearby: {b['population']}"
     ).add_to(m)
 
+# ======================================================
+# 9️⃣ SAVE MAP
+# ======================================================
 m
