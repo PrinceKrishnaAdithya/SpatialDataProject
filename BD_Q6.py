@@ -10,77 +10,85 @@ High TRRI → Very few towers nearby
 → Network failure risk if a tower goes down
 """
 
+
+# ======================================================
+# 1️⃣ IMPORTS
+# ======================================================
 from pymongo import MongoClient
-from math import radians, cos, sin, sqrt, atan2
+import numpy as np
+from shapely.geometry import shape, Point
 import folium
 
 # ======================================================
-# CONNECT DATABASE
+# 2️⃣ CONNECT TO MONGODB ATLAS
 # ======================================================
-client = MongoClient(
- "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/"
-)
-db = client["BigData_Spatial"]
+MONGO_URI = "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/?retryWrites=true&w=majority"
 
-towers_col = db.towers_clean
+client = MongoClient(MONGO_URI)
+db = client["MongoDB"]
 
-print("Loading tower data...")
-towers = [t["geometry"]["coordinates"] for t in towers_col.find()]
-print("Total towers:", len(towers))
+states = db.states_clean_fixed
+towers_col = db.towers_clean_fixed
 
-# ======================================================
-# HAVERSINE DISTANCE
-# ======================================================
-def distance_km(a, b):
-    lon1, lat1 = a
-    lon2, lat2 = b
-    
-    R = 6371
-    dlon = radians(lon2 - lon1)
-    dlat = radians(lat2 - lat1)
-    
-    aa = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
-    c = 2 * atan2(sqrt(aa), sqrt(1-aa))
-    return R * c
+print("✅ Connected to MongoDB Atlas")
 
 # ======================================================
-# CREATE 30km GRID OVER TAMIL NADU
+# 3️⃣ LOAD TAMIL NADU POLYGON
+# ======================================================
+tn_doc = states.find_one({"properties.st_nm": "Tamil Nadu"})
+tn_geojson = tn_doc["geometry"]
+tn_polygon = shape(tn_geojson)
+
+minx, miny, maxx, maxy = tn_polygon.bounds
+print("✅ Tamil Nadu boundary loaded")
+
+# ======================================================
+# 4️⃣ LOAD TOWERS ONCE (FAST)
+# ======================================================
+print("Loading tower points...")
+tower_docs = list(towers_col.find({}, {"geometry.coordinates": 1}))
+print("Total towers:", len(tower_docs))
+
+towers = np.array([t["geometry"]["coordinates"] for t in tower_docs])
+
+# ======================================================
+# 5️⃣ CREATE 30km GRID INSIDE TAMIL NADU
 # ======================================================
 print("Creating redundancy grid...")
 
 grid = []
-lon_start, lon_end = 76.0, 80.5
-lat_start, lat_end = 8.0, 13.5
-step = 0.30  # ≈30 km
+step = 0.30   # ≈30 km grid
 
-lat = lat_start
-while lat <= lat_end:
-    lon = lon_start
-    while lon <= lon_end:
-        grid.append([lon, lat])
-        lon += step
-    lat += step
+for x in np.arange(minx, maxx, step):
+    for y in np.arange(miny, maxy, step):
+        if tn_polygon.contains(Point(x, y)):
+            grid.append([x, y])
 
 print("Grid cells:", len(grid))
 
 # ======================================================
-# COMPUTE TRRI
+# 6️⃣ FAST DISTANCE FUNCTION
 # ======================================================
-RADIUS_KM = 30
+def count_within_radius(points, center, radius_km):
+    dx = (points[:,0] - center[0]) * 111
+    dy = (points[:,1] - center[1]) * 111
+    dist = np.sqrt(dx**2 + dy**2)
+    return np.sum(dist <= radius_km)
+
+# ======================================================
+# 7️⃣ COMPUTE TRRI
+# ======================================================
+print("⚠️ Calculating redundancy risk...")
+
 results = []
 
 for cell in grid:
-
-    nearby_towers = sum(
-        1 for t in towers
-        if distance_km(cell, t) <= RADIUS_KM
-    )
-
-    trri = 1 / (nearby_towers + 1)
+    tower_count = count_within_radius(towers, cell, 30)
+    trri = 1 / (tower_count + 1)
 
     results.append({
-        "center": cell,
-        "TRRI": trri
+        "center": [float(cell[0]), float(cell[1])],
+        "TRRI": float(trri)
     })
 
 results.sort(key=lambda x: x["TRRI"], reverse=True)
@@ -90,11 +98,19 @@ for r in results[:10]:
     print(r)
 
 # ======================================================
-# MAP VISUALIZATION
+# 8️⃣ MAP VISUALISATION
 # ======================================================
+print("Creating map...")
+
 m = folium.Map(location=[11,78], zoom_start=7)
 
-# 🟠 High risk (few towers nearby)
+# Tamil Nadu boundary
+folium.GeoJson(
+    tn_geojson,
+    style_function=lambda x: {"fill": False, "color": "black", "weight": 2}
+).add_to(m)
+
+# 🟠 High redundancy risk
 for r in results[:120]:
     folium.CircleMarker(
         location=[r["center"][1], r["center"][0]],
@@ -104,7 +120,7 @@ for r in results[:120]:
         popup=f"TRRI: {round(r['TRRI'],3)}"
     ).add_to(m)
 
-# 🔵 Low risk (good redundancy)
+# 🔵 Low redundancy risk
 for r in results[-120:]:
     folium.CircleMarker(
         location=[r["center"][1], r["center"][0]],
@@ -113,4 +129,7 @@ for r in results[-120:]:
         fill=True
     ).add_to(m)
 
+# ======================================================
+# 9️⃣ SAVE MAP
+# ======================================================
 m
