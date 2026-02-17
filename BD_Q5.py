@@ -11,67 +11,69 @@ Count how many settlements depend on each tower.
 Higher NTDI → Tower serves many settlements → High load / dependency
 """
 
+
+# ======================================================
+# 1️⃣ IMPORTS
+# ======================================================
 from pymongo import MongoClient
-from math import radians, cos, sin, sqrt, atan2
+import numpy as np
 import folium
 
 # ======================================================
-# CONNECT DATABASE
+# 2️⃣ CONNECT TO MONGODB ATLAS
 # ======================================================
-client = MongoClient(
- "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/"
+MONGO_URI = "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/?retryWrites=true&w=majority"
+
+client = MongoClient(MONGO_URI)
+db = client["MongoDB"]
+
+population = db.population_points_fixed
+towers_col = db.towers_clean_fixed
+
+print("✅ Connected to MongoDB Atlas")
+
+# ======================================================
+# 3️⃣ LOAD DATA INTO MEMORY (ONCE)
+# ======================================================
+print("Loading data...")
+
+settlements = np.array(
+    [p["geometry"]["coordinates"] for p in population.find({}, {"geometry.coordinates":1})]
 )
-db = client["BigData_Spatial"]
 
-population = db.population_points     # residential points
-towers_col = db.towers_clean          # telecom towers
-
-print("Loading data into memory...")
-
-settlements = [p["geometry"]["coordinates"] for p in population.find()]
-towers = [t["geometry"]["coordinates"] for t in towers_col.find()]
+towers = np.array(
+    [t["geometry"]["coordinates"] for t in towers_col.find({}, {"geometry.coordinates":1})]
+)
 
 print("Settlements:", len(settlements))
 print("Towers:", len(towers))
 
 # ======================================================
-# HAVERSINE DISTANCE FUNCTION
+# 4️⃣ FAST DISTANCE COMPUTATION (VECTORISED)
 # ======================================================
-def distance_km(a, b):
-    lon1, lat1 = a
-    lon2, lat2 = b
-    
-    R = 6371
-    dlon = radians(lon2 - lon1)
-    dlat = radians(lat2 - lat1)
-    
-    aa = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
-    c = 2 * atan2(sqrt(aa), sqrt(1-aa))
-    return R * c
+print("Computing nearest tower for each settlement...")
 
-# ======================================================
-# COMPUTE NTDI (FAST LOCAL)
-# ======================================================
-print("Finding nearest tower for each settlement...")
-
-tower_dependency = {tuple(t):0 for t in towers}
+tower_dependency = np.zeros(len(towers), dtype=int)
 
 for s in settlements:
-
-    nearest_tower = min(
-        towers,
-        key=lambda t: distance_km(s, t)
-    )
-
-    tower_dependency[tuple(nearest_tower)] += 1
+    dx = (towers[:,0] - s[0]) * 111
+    dy = (towers[:,1] - s[1]) * 111
+    dist = np.sqrt(dx**2 + dy**2)
+    nearest_index = np.argmin(dist)
+    tower_dependency[nearest_index] += 1
 
 print("Dependency calculation complete!")
 
-# Convert to sorted results
-results = [
-    {"tower": list(k), "dependency": v}
-    for k,v in tower_dependency.items()
-]
+# ======================================================
+# 5️⃣ PREPARE RESULTS
+# ======================================================
+results = []
+
+for i, count in enumerate(tower_dependency):
+    results.append({
+        "tower": [float(towers[i][0]), float(towers[i][1])],
+        "dependency": int(count)
+    })
 
 results.sort(key=lambda x: x["dependency"], reverse=True)
 
@@ -80,11 +82,13 @@ for r in results[:10]:
     print(r)
 
 # ======================================================
-# MAP VISUALIZATION
+# 6️⃣ MAP VISUALIZATION
 # ======================================================
+print("Creating map...")
+
 m = folium.Map(location=[11,78], zoom_start=7)
 
-# 🔴 Highly depended towers (top 60)
+# 🔴 Highly loaded towers
 for r in results[:60]:
     folium.CircleMarker(
         location=[r["tower"][1], r["tower"][0]],
@@ -94,7 +98,7 @@ for r in results[:60]:
         popup=f"Dependent settlements: {r['dependency']}"
     ).add_to(m)
 
-# 🟢 Low dependency towers (bottom 60)
+# 🟢 Low dependency towers
 for r in results[-60:]:
     folium.CircleMarker(
         location=[r["tower"][1], r["tower"][0]],
@@ -103,4 +107,9 @@ for r in results[-60:]:
         fill=True
     ).add_to(m)
 
-m
+# ======================================================
+# 7️⃣ SAVE MAP
+# ======================================================
+m.save("Tower_Dependency_Map.html")
+print("✅ Map saved as Tower_Dependency_Map.html")
+
