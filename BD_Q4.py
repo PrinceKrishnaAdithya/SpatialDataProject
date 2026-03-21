@@ -8,106 +8,117 @@ HDTZ = Population / (Towers + 1)
 High HDTZ → Many people, few towers → Expansion priority
 """
 
-# ======================================================
-# 1️⃣ IMPORTS
-# ======================================================
 from pymongo import MongoClient
 import numpy as np
-from shapely.geometry import shape, Point
 import folium
-from folium.plugins import HeatMap
 
 # ======================================================
-# 2️⃣ CONNECT TO MONGODB ATLAS
+# 1️⃣ CONNECT TO MONGODB
 # ======================================================
 MONGO_URI = "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/?retryWrites=true&w=majority"
 
 client = MongoClient(MONGO_URI)
 db = client["MongoDB"]
 
-states = db.states_clean_fixed
 population = db.population_points_fixed
 towers = db.towers_clean_fixed
 
-print("✅ Connected to MongoDB Atlas")
+print("✅ Connected to MongoDB")
 
 # ======================================================
-# 3️⃣ LOAD TAMIL NADU POLYGON
+# 2️⃣ HARD CODED TAMIL NADU BOUNDING BOX
 # ======================================================
-tn_doc = states.find_one({"properties.st_nm": "Tamil Nadu"})
-tn_geojson = tn_doc["geometry"]
-tn_polygon = shape(tn_geojson)
-
-minx, miny, maxx, maxy = tn_polygon.bounds
-print("✅ Tamil Nadu boundary loaded")
+minx = 76.0   # West
+miny = 8.0    # South
+maxx = 80.5   # East
+maxy = 13.5   # North
 
 # ======================================================
-# 4️⃣ CREATE GRID
+# 3️⃣ CREATE GRID
 # ======================================================
 print("Creating grid...")
 
-grid_points = []
-step = 0.05   # 5km grid
+grid = []
+step = 0.1  # ~10 km resolution
 
 for x in np.arange(minx, maxx, step):
     for y in np.arange(miny, maxy, step):
-        if tn_polygon.contains(Point(x, y)):
-            grid_points.append([x, y])
+        grid.append([x, y])
 
-print("Grid cells:", len(grid_points))
-
-# ======================================================
-# 5️⃣ LOAD ALL POINTS ONCE (FAST)
-# ======================================================
-print("Loading population points...")
-pop_docs = list(population.find({}, {"geometry.coordinates": 1}))
-print("Population points:", len(pop_docs))
-
-print("Loading tower points...")
-tower_docs = list(towers.find({}, {"geometry.coordinates": 1}))
-print("Tower points:", len(tower_docs))
-
-pop_points = np.array([d["geometry"]["coordinates"] for d in pop_docs])
-tower_points = np.array([d["geometry"]["coordinates"] for d in tower_docs])
+print("Grid size:", len(grid))
 
 # ======================================================
-# 6️⃣ FAST DISTANCE FUNCTION
+# 4️⃣ LOAD DATA
 # ======================================================
-def count_within_radius(points, center, radius_km):
-    dx = (points[:,0] - center[0]) * 111
-    dy = (points[:,1] - center[1]) * 111
+print("Loading data...")
+
+pop_points = np.array([
+    doc["geometry"]["coordinates"]
+    for doc in population.find({}, {"geometry.coordinates": 1})
+])
+
+tower_points = np.array([
+    doc["geometry"]["coordinates"]
+    for doc in towers.find({}, {"geometry.coordinates": 1})
+])
+
+print("Population points:", len(pop_points))
+print("Tower points:", len(tower_points))
+
+# ======================================================
+# 5️⃣ DISTANCE FUNCTIONS
+# ======================================================
+def count_within(points, center, radius_km):
+    dx = (points[:, 0] - center[0]) * 111
+    dy = (points[:, 1] - center[1]) * 111
     dist = np.sqrt(dx**2 + dy**2)
     return np.sum(dist <= radius_km)
 
+def is_covered(center, towers, radius_km):
+    dx = (towers[:, 0] - center[0]) * 111
+    dy = (towers[:, 1] - center[1]) * 111
+    dist = np.sqrt(dx**2 + dy**2)
+    return np.any(dist <= radius_km)
+
 # ======================================================
-# 7️⃣ CALCULATE HDTZ (FAST LOOP)
+# 6️⃣ PARAMETERS
 # ======================================================
-print("📡 Calculating tower expansion priority...")
+RADIUS_KM = 15   # realistic telecom coverage
+
+# ======================================================
+# 7️⃣ CALCULATE HDTZ
+# ======================================================
+print("Calculating HDTZ...")
 
 results = []
-population_cells = []
 
-for p in grid_points:
+for g in grid:
+    pop_count = count_within(pop_points, g, 15)
+    if pop_count == 0:
+        continue
 
-    pop_count = count_within_radius(pop_points, p, 15)
-    tower_count = count_within_radius(tower_points, p, 15)
+    tower_count = count_within(tower_points, g, 15)
 
-    if pop_count > 0:
-        population_cells.append([float(p[1]), float(p[0]), int(pop_count)])
+    # ❌ Skip already covered areas
+    if is_covered(g, tower_points, RADIUS_KM):
+        continue
 
     hdtz = pop_count / (tower_count + 1)
 
     results.append({
-        "center": [float(p[0]), float(p[1])],
+        "point": g,
         "population": int(pop_count),
         "towers": int(tower_count),
-        "HDTZ": round(float(hdtz), 2)
+        "HDTZ": round(hdtz, 2)
     })
 
+# Sort by priority
 results.sort(key=lambda x: x["HDTZ"], reverse=True)
 
-print("\n📡 BEST LOCATIONS FOR NEW TOWERS:")
-for r in results[:10]:
+top_locations = results[:20]
+
+print("\n🔥 TOP NEW TOWER LOCATIONS:")
+for r in top_locations:
     print(r)
 
 # ======================================================
@@ -115,36 +126,40 @@ for r in results[:10]:
 # ======================================================
 print("Creating map...")
 
-m = folium.Map(location=[11,78], zoom_start=7)
+m = folium.Map(location=[11, 78], zoom_start=7)
 
-# Tamil Nadu boundary
-folium.GeoJson(
-    tn_geojson,
-    style_function=lambda x: {"fill": False, "color": "black", "weight": 2}
-).add_to(m)
+# ======================================================
+# 9️⃣ EXISTING TOWERS (BLUE)
+# ======================================================
+for t in tower_points:
+    lon, lat = t
 
-# Population heatmap
-HeatMap(population_cells, radius=18).add_to(m)
-
-# 🔴 HIGH DEMAND ZONES (build towers here)
-for zone in results[:20]:
-    folium.Marker(
-        [zone["center"][1], zone["center"][0]],
-        icon=folium.Icon(color="red"),
-        popup=f"BUILD TOWER | HDTZ:{zone['HDTZ']} | Pop:{zone['population']} | Towers:{zone['towers']}"
-    ).add_to(m)
-
-# 🟢 LOW PRIORITY ZONES
-for zone in results[-15:]:
     folium.CircleMarker(
-        [zone["center"][1], zone["center"][0]],
-        radius=5,
-        color="green",
+        [lat, lon],
+        radius=2,
+        color="blue",
         fill=True,
-        popup=f"Low demand HDTZ:{zone['HDTZ']}"
+        fill_opacity=0.7
     ).add_to(m)
 
 # ======================================================
-# 9️⃣ SAVE MAP
+# 🔟 NEW TOWERS (GREEN)
+# ======================================================
+for loc in top_locations:
+    lon, lat = loc["point"]
+
+
+
+    # Coverage radius
+    folium.Circle(
+        [lat, lon],
+        radius=RADIUS_KM * 1000,
+        color="green",
+        fill=True,
+        fill_opacity=0.2
+    ).add_to(m)
+
+# ======================================================
+# 1️⃣1️⃣ DISPLAY MAP
 # ======================================================
 m
