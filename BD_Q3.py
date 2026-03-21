@@ -7,131 +7,106 @@ but NO telecom towers exist nearby.
 These are true network black spots.
 """
 
-
-# ======================================================
-# 1️⃣ IMPORTS
-# ======================================================
 from pymongo import MongoClient
-import numpy as np
-from shapely.geometry import shape, Point
 import folium
-from folium.plugins import HeatMap
+import numpy as np
 
 # ======================================================
-# 2️⃣ CONNECT TO MONGODB ATLAS
+# 1️⃣ CONNECT
 # ======================================================
 MONGO_URI = "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/?retryWrites=true&w=majority"
 
 client = MongoClient(MONGO_URI)
 db = client["MongoDB"]
 
-states = db.states_clean_fixed
-population = db.population_points_fixed
 towers = db.towers_clean_fixed
+population = db.population_points_fixed
 
-print("✅ Connected to MongoDB Atlas")
-
-# ======================================================
-# 3️⃣ LOAD TAMIL NADU POLYGON
-# ======================================================
-tn_doc = states.find_one({"properties.st_nm": "Tamil Nadu"})
-tn_geojson = tn_doc["geometry"]
-tn_polygon = shape(tn_geojson)
-
-minx, miny, maxx, maxy = tn_polygon.bounds
-print("✅ Tamil Nadu boundary loaded")
+print("✅ Connected")
 
 # ======================================================
-# 4️⃣ CREATE GRID
+# 2️⃣ LOAD DATA
 # ======================================================
-print("Creating grid...")
-
-grid_points = []
-step = 0.05   # 5km grid
-
-for x in np.arange(minx, maxx, step):
-    for y in np.arange(miny, maxy, step):
-        if tn_polygon.contains(Point(x, y)):
-            grid_points.append([x, y])
-
-print("Grid cells:", len(grid_points))
-
-# ======================================================
-# 5️⃣ LOAD ALL POINTS ONCE (FAST)
-# ======================================================
-print("Loading population points...")
-pop_docs = list(population.find({}, {"geometry.coordinates": 1}))
-print("Population points:", len(pop_docs))
-
-print("Loading tower points...")
 tower_docs = list(towers.find({}, {"geometry.coordinates": 1}))
-print("Tower points:", len(tower_docs))
+pop_docs = list(population.find({}, {"geometry.coordinates": 1}))
 
-pop_points = np.array([d["geometry"]["coordinates"] for d in pop_docs])
-tower_points = np.array([d["geometry"]["coordinates"] for d in tower_docs])
+tower_points = np.array([doc["geometry"]["coordinates"] for doc in tower_docs])
+pop_points = np.array([doc["geometry"]["coordinates"] for doc in pop_docs])
+
+print("Towers:", len(tower_points))
+print("Population:", len(pop_points))
 
 # ======================================================
-# 6️⃣ FAST DISTANCE FUNCTION
+# 3️⃣ MAP
 # ======================================================
-def count_within_radius(points, center, radius_km):
-    dx = (points[:,0] - center[0]) * 111
-    dy = (points[:,1] - center[1]) * 111
+m = folium.Map(location=[11, 78], zoom_start=7)
+
+# ======================================================
+# 4️⃣ PARAMETERS
+# ======================================================
+RADIUS_KM = 18   # 🔥 Larger realistic coverage
+
+# ======================================================
+# 5️⃣ COVERAGE CHECK FUNCTION
+# ======================================================
+def is_covered(point, towers, radius_km):
+    dx = (towers[:, 0] - point[0]) * 111
+    dy = (towers[:, 1] - point[1]) * 111
     dist = np.sqrt(dx**2 + dy**2)
-    return np.sum(dist <= radius_km)
+    return np.any(dist <= radius_km)
 
 # ======================================================
-# 7️⃣ DETECT BLACKSPOTS
+# 6️⃣ PLOT TOWERS + COVERAGE
 # ======================================================
-print("🚨 Detecting telecom blackspots...")
+for t in tower_points:
+    lon, lat = t
 
-blackspots = []
-population_cells = []
+    # tower
+    folium.CircleMarker(
+        [lat, lon],
+        radius=3,
+        color="blue",
+        fill=True
+    ).add_to(m)
 
-for p in grid_points:
-
-    pop_count = count_within_radius(pop_points, p, 15)
-    tower_count = count_within_radius(tower_points, p, 15)
-
-    if pop_count > 0:
-        population_cells.append([float(p[1]), float(p[0]), int(pop_count)])
-
-
-    # BLACKSPOT CONDITION
-    if pop_count > 0 and tower_count == 0:
-        blackspots.append({
-            "center": [float(p[0]), float(p[1])],
-            "population": int(pop_count)
-        })
-
-print("\n🚨 TOTAL BLACKSPOTS FOUND:", len(blackspots))
-for b in blackspots[:10]:
-    print(b)
-
-# ======================================================
-# 8️⃣ CREATE MAP
-# ======================================================
-print("Creating map...")
-
-m = folium.Map(location=[11,78], zoom_start=7)
-
-# Tamil Nadu boundary
-folium.GeoJson(
-    tn_geojson,
-    style_function=lambda x: {"fill": False, "color": "black", "weight": 2}
-).add_to(m)
-
-# Population heatmap
-HeatMap(population_cells, radius=18).add_to(m)
-
-# 🚨 Blackspot markers
-for b in blackspots:
-    folium.Marker(
-        [b["center"][1], b["center"][0]],
-        icon=folium.Icon(color="black"),
-        popup=f"📵 BLACKSPOT | Population nearby: {b['population']}"
+    # coverage
+    folium.Circle(
+        [lat, lon],
+        radius=RADIUS_KM * 1000,
+        color="blue",
+        fill=True,
+        fill_opacity=0.05
     ).add_to(m)
 
 # ======================================================
-# 9️⃣ SAVE MAP
+# 7️⃣ FIND BLACK SPOTS
+# ======================================================
+print("Detecting black spots...")
+
+black_spots = []
+
+for p in pop_points:
+    if not is_covered(p, tower_points, RADIUS_KM):
+        black_spots.append(p)
+
+# ======================================================
+# 8️⃣ PLOT BLACK SPOTS
+# ======================================================
+for p in black_spots:
+    lon, lat = p
+
+    folium.CircleMarker(
+        [lat, lon],
+        radius=3,
+        color="black",
+        fill=True,
+        fill_opacity=1,
+        popup="Black Spot (No Coverage)"
+    ).add_to(m)
+
+print("Total Black Spots:", len(black_spots))
+
+# ======================================================
+# 9️⃣ DISPLAY MAP
 # ======================================================
 m
