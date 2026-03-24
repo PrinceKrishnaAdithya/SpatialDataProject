@@ -1,135 +1,94 @@
-"""
-🌍 Question 6: Telecom Redundancy Risk Index (TRRI)
-📌 Problem Statement
-Identify areas with poor telecom redundancy.
-
-🧠 Concept
-TRRI = 1 / (Towers + 1)
-
-High TRRI → Very few towers nearby
-→ Network failure risk if a tower goes down
-"""
-
-
-# ======================================================
-# 1️⃣ IMPORTS
-# ======================================================
 from pymongo import MongoClient
+from shapely.geometry import shape, mapping, Point, MultiPolygon
+from shapely.ops import unary_union
+import geopandas as gpd
+import pandas as pd
 import numpy as np
-from shapely.geometry import shape, Point
 import folium
+from folium.plugins import HeatMap, MarkerCluster
+import json, math
 
-# ======================================================
-# 2️⃣ CONNECT TO MONGODB ATLAS
-# ======================================================
+# ─────────────────────────────────────────────
+#  CONNECTION
+# ─────────────────────────────────────────────
 MONGO_URI = "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/?retryWrites=true&w=majority"
-
 client = MongoClient(MONGO_URI)
 db = client["MongoDB"]
 
-states = db.states_clean_fixed
-towers_col = db.towers_clean_fixed
+towers     = db.towers_clean_fixed
+population = db.population_points_fixed
+districs   = db.districs
+roads      = db.road_network
 
-print("✅ Connected to MongoDB Atlas")
+TN_CENTER = [10.8, 78.7]
 
-# ======================================================
-# 3️⃣ LOAD TAMIL NADU POLYGON
-# ======================================================
-tn_doc = states.find_one({"properties.st_nm": "Tamil Nadu"})
-tn_geojson = tn_doc["geometry"]
-tn_polygon = shape(tn_geojson)
+print("✅ Connected to MongoDB")
+print(f"  Towers       : {towers.count_documents({})}")
+print(f"  Settlements  : {population.count_documents({})}")
+print(f"  Districts    : {districs.count_documents({})}")
+print(f"  Road segments: {roads.count_documents({})}")
 
-minx, miny, maxx, maxy = tn_polygon.bounds
-print("✅ Tamil Nadu boundary loaded")
 
-# ======================================================
-# 4️⃣ LOAD TOWERS ONCE (FAST)
-# ======================================================
-print("Loading tower points...")
-tower_docs = list(towers_col.find({}, {"geometry.coordinates": 1}))
-print("Total towers:", len(tower_docs))
+# ╔══════════════════════════════════════════════════════════╗
+# ║  Q6 — Nearest Tower Distance Heatmap                   ║
+# ║  $near KNN for every settlement → distance heatmap      ║
+# ╚══════════════════════════════════════════════════════════╝
+def query6_distance_heatmap():
+    """
+    SPATIAL OP : $near KNN search for every settlement point
+    QUESTION   : What is the spatial distribution of distance-to-nearest-tower across TN?
+    INSIGHT    : Continuous surface view of coverage quality — hot = far from tower.
+    """
+    print("\n[Q6] Building distance-to-nearest-tower heatmap...")
 
-towers = np.array([t["geometry"]["coordinates"] for t in tower_docs])
+    pop_sample = list(population.find({}, {"geometry": 1}).limit(3000))
+    heatmap_data = []
 
-# ======================================================
-# 5️⃣ CREATE 30km GRID INSIDE TAMIL NADU
-# ======================================================
-print("Creating redundancy grid...")
+    for p in pop_sample:
+        nearest = towers.find_one({
+            "geometry": {
+                "$near": {"$geometry": p["geometry"]}
+            }
+        })
 
-grid = []
-step = 0.30   # ≈30 km grid
+        if nearest:
+            p_coord = p["geometry"]["coordinates"]
+            t_coord = nearest["geometry"]["coordinates"]
+            dist_km = math.sqrt((p_coord[0]-t_coord[0])**2 + (p_coord[1]-t_coord[1])**2) * 111
+            # Weight heatmap by distance (farther = hotter)
+            heatmap_data.append([p_coord[1], p_coord[0], min(dist_km, 30)])
 
-for x in np.arange(minx, maxx, step):
-    for y in np.arange(miny, maxy, step):
-        if tn_polygon.contains(Point(x, y)):
-            grid.append([x, y])
+    # ── MAP ──────────────────────────────────────────────────
+    m = folium.Map(location=TN_CENTER, zoom_start=7, tiles="CartoDB dark_matter")
 
-print("Grid cells:", len(grid))
-
-# ======================================================
-# 6️⃣ FAST DISTANCE FUNCTION
-# ======================================================
-def count_within_radius(points, center, radius_km):
-    dx = (points[:,0] - center[0]) * 111
-    dy = (points[:,1] - center[1]) * 111
-    dist = np.sqrt(dx**2 + dy**2)
-    return np.sum(dist <= radius_km)
-
-# ======================================================
-# 7️⃣ COMPUTE TRRI
-# ======================================================
-print("⚠️ Calculating redundancy risk...")
-
-results = []
-
-for cell in grid:
-    tower_count = count_within_radius(towers, cell, 30)
-    trri = 1 / (tower_count + 1)
-
-    results.append({
-        "center": [float(cell[0]), float(cell[1])],
-        "TRRI": float(trri)
-    })
-
-results.sort(key=lambda x: x["TRRI"], reverse=True)
-
-print("\n⚠️ HIGHEST REDUNDANCY RISK ZONES:")
-for r in results[:10]:
-    print(r)
-
-# ======================================================
-# 8️⃣ MAP VISUALISATION
-# ======================================================
-print("Creating map...")
-
-m = folium.Map(location=[11,78], zoom_start=7)
-
-# Tamil Nadu boundary
-folium.GeoJson(
-    tn_geojson,
-    style_function=lambda x: {"fill": False, "color": "black", "weight": 2}
-).add_to(m)
-
-# 🟠 High redundancy risk
-for r in results[:120]:
-    folium.CircleMarker(
-        location=[r["center"][1], r["center"][0]],
-        radius=6,
-        color="orange",
-        fill=True,
-        popup=f"TRRI: {round(r['TRRI'],3)}"
+    HeatMap(
+        heatmap_data,
+        min_opacity=0.3,
+        max_val=30,
+        radius=18,
+        blur=12,
+        gradient={0.2: "blue", 0.4: "cyan", 0.6: "yellow", 0.8: "orange", 1.0: "red"}
     ).add_to(m)
 
-# 🔵 Low redundancy risk
-for r in results[-120:]:
-    folium.CircleMarker(
-        location=[r["center"][1], r["center"][0]],
-        radius=3,
-        color="blue",
-        fill=True
-    ).add_to(m)
+    legend = """
+    <div style='position:fixed;bottom:30px;left:30px;z-index:1000;
+                background:#1a1a2e;color:white;padding:12px 16px;border-radius:8px;
+                font-family:sans-serif;font-size:13px'>
+      <b>Q10 — Distance-to-Tower Heatmap</b><br>
+      Heat intensity = distance to nearest tower<br>
+      <span style='color:red'>■</span> Very far (poor coverage)<br>
+      <span style='color:cyan'>■</span> Close (good coverage)<br>
+      <span style='color:blue'>■</span> Excellent coverage
+    </div>"""
+    m.get_root().html.add_child(folium.Element(legend))
 
-# ======================================================
-# 9️⃣ SAVE MAP
-# ======================================================
-m
+    m.save("q6_distance_heatmap.html")
+    print(f"  Processed {len(heatmap_data)} settlement distances")
+    print("  ✅ Saved: q6_distance_heatmap.html")
+    return heatmap_data
+
+
+
+
+if __name__ == "__main__":
+    query6_distance_heatmap()
