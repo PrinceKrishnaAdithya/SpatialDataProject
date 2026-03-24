@@ -1,150 +1,111 @@
-"""
-🌍 QUERY 2: Telecom Accessibility Index (TAI)
-
-Find BEST connected telecom regions in Tamil Nadu.
-
-TAI = (1.2 × Towers) − (0.5 × Population)
-
-Blue zones → Excellent telecom connectivity
-Red zones → Poor connectivity
-"""
-
-# ======================================================
-# 1️⃣ IMPORTS
-# ======================================================
 from pymongo import MongoClient
+from shapely.geometry import shape, mapping, Point, MultiPolygon
+from shapely.ops import unary_union
+import geopandas as gpd
+import pandas as pd
 import numpy as np
-from shapely.geometry import shape, Point
 import folium
-from folium.plugins import HeatMap
+from folium.plugins import HeatMap, MarkerCluster
+import json, math
 
-# ======================================================
-# 2️⃣ CONNECT TO MONGODB ATLAS
-# ======================================================
+# ─────────────────────────────────────────────
+#  CONNECTION
+# ─────────────────────────────────────────────
 MONGO_URI = "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/?retryWrites=true&w=majority"
-
 client = MongoClient(MONGO_URI)
 db = client["MongoDB"]
 
-states = db.states_clean_fixed
+towers     = db.towers_clean_fixed
 population = db.population_points_fixed
-towers = db.towers_clean_fixed
+districs   = db.districs
+roads      = db.road_network
 
-print("✅ Connected to MongoDB Atlas")
+TN_CENTER = [10.8, 78.7]
 
-# ======================================================
-# 3️⃣ LOAD TAMIL NADU POLYGON
-# ======================================================
-tn_doc = states.find_one({"properties.st_nm": "Tamil Nadu"})
-tn_geojson = tn_doc["geometry"]
-tn_polygon = shape(tn_geojson)
+print("✅ Connected to MongoDB")
+print(f"  Towers       : {towers.count_documents({})}")
+print(f"  Settlements  : {population.count_documents({})}")
+print(f"  Districts    : {districs.count_documents({})}")
+print(f"  Road segments: {roads.count_documents({})}")
 
-minx, miny, maxx, maxy = tn_polygon.bounds
-print("✅ Tamil Nadu boundary loaded")
 
-# ======================================================
-# 4️⃣ CREATE GRID
-# ======================================================
-print("Creating grid...")
+# ╔══════════════════════════════════════════════════════════╗
+# ║  Q2 — True Uncovered Settlements (Buffer + Difference)  ║
+# ║  Union of tower buffers → settlements outside union     ║
+# ╚══════════════════════════════════════════════════════════╝
+def query2_uncovered_settlements(radius_km=5):
+    """
+    SPATIAL OP : Buffer + unary_union + point-not-in-polygon (spatial difference)
+    QUESTION   : Which residential settlements fall OUTSIDE all tower coverage zones?
+    INSIGHT    : True last-mile gap — people with no tower within radius_km.
+    """
+    print(f"\n[Q2] Finding settlements outside {radius_km}km coverage bubble...")
 
-grid_points = []
-step = 0.05  # ~5km resolution
+    # Sample TN towers (limit for performance)
+    tower_docs = list(towers.find({}, {"geometry": 1}).limit(3000))
+    tower_geoms = [shape(t["geometry"]) for t in tower_docs]
 
-for x in np.arange(minx, maxx, step):
-    for y in np.arange(miny, maxy, step):
-        if tn_polygon.contains(Point(x, y)):
-            grid_points.append([x, y])
+    DEG = radius_km / 111.0
+    coverage_union = unary_union([g.buffer(DEG) for g in tower_geoms])
 
-print("Grid cells:", len(grid_points))
+    pop_docs = list(population.find({}, {"geometry": 1, "properties": 1}))
 
-# ======================================================
-# 5️⃣ LOAD ALL POINTS ONCE (FAST)
-# ======================================================
-print("Loading population points...")
-pop_docs = list(population.find({}, {"geometry.coordinates": 1}))
-print("Population points:", len(pop_docs))
+    covered, uncovered = [], []
+    for p in pop_docs:
+        pt = shape(p["geometry"])
+        name = p.get("properties", {}).get("name", "Unknown")
+        entry = {"name": name, "coords": [pt.y, pt.x]}
+        if coverage_union.contains(pt):
+            covered.append(entry)
+        else:
+            uncovered.append(entry)
 
-print("Loading tower points...")
-tower_docs = list(towers.find({}, {"geometry.coordinates": 1}))
-print("Tower points:", len(tower_docs))
+    # ── MAP ──────────────────────────────────────────────────
+    m = folium.Map(location=TN_CENTER, zoom_start=7, tiles="CartoDB dark_matter")
 
-pop_points = np.array([d["geometry"]["coordinates"] for d in pop_docs])
-tower_points = np.array([d["geometry"]["coordinates"] for d in tower_docs])
-
-# ======================================================
-# 6️⃣ FAST DISTANCE FUNCTION
-# ======================================================
-def count_within_radius(points, center, radius_km):
-    dx = (points[:,0] - center[0]) * 111
-    dy = (points[:,1] - center[1]) * 111
-    dist = np.sqrt(dx**2 + dy**2)
-    return np.sum(dist <= radius_km)
-
-# ======================================================
-# 7️⃣ CALCULATE TAI (FAST LOOP)
-# ======================================================
-print("⚡ Calculating TAI...")
-
-results = []
-
-for p in grid_points:
-    pop_count = count_within_radius(pop_points, p, 15)
-    tower_count = count_within_radius(tower_points, p, 15)
-
-    tai = (1.2 * tower_count) - (0.5 * pop_count)
-
-    results.append({
-        "center": p,
-        "population": int(pop_count),
-        "towers": int(tower_count),
-        "TAI": round(tai, 2)
-    })
-
-results.sort(key=lambda x: x["TAI"], reverse=True)
-
-print("\n📡 BEST CONNECTED REGIONS:")
-for r in results[:10]:
-    print(r)
-
-# ======================================================
-# 8️⃣ CREATE MAP
-# ======================================================
-print("Creating map...")
-
-m = folium.Map(location=[11,78], zoom_start=7)
-
-# Tamil Nadu boundary
-folium.GeoJson(
-    tn_geojson,
-    style_function=lambda x: {"fill": False, "color": "black", "weight": 2}
-).add_to(m)
-
-# Tower heatmap
-heat_data = [
-    [r["center"][1], r["center"][0], r["towers"]]
-    for r in results if r["towers"] > 0
-]
-HeatMap(heat_data, radius=18).add_to(m)
-
-# 🔵 Excellent connectivity
-for zone in results[:20]:
-    folium.Marker(
-        [zone["center"][1], zone["center"][0]],
-        icon=folium.Icon(color="blue"),
-        popup=f"TAI:{zone['TAI']} | Towers:{zone['towers']} | Pop:{zone['population']}"
+    # Coverage footprint
+    folium.GeoJson(
+        mapping(coverage_union),
+        style_function=lambda x: {
+            "fillColor": "#2ecc71", "fillOpacity": 0.15,
+            "color": "#2ecc71", "weight": 0.3
+        },
+        name="Coverage zone"
     ).add_to(m)
 
-# 🔴 Poor connectivity
-for zone in results[-15:]:
-    folium.CircleMarker(
-        [zone["center"][1], zone["center"][0]],
-        radius=5,
-        color="red",
-        fill=True,
-        popup=f"Poor connectivity TAI:{zone['TAI']}"
-    ).add_to(m)
+    # Uncovered settlements — red
+    for u in uncovered[:2000]:
+        folium.CircleMarker(
+            u["coords"], radius=3, color="#e74c3c",
+            fill=True, fill_opacity=0.8,
+            tooltip=f"⚠️ {u['name']} — NO coverage"
+        ).add_to(m)
 
-# ======================================================
-# 9️⃣ SAVE MAP
-# ======================================================
-m
+    # Covered — small green dots
+    for c in covered[:1000]:
+        folium.CircleMarker(
+            c["coords"], radius=2, color="#2ecc71",
+            fill=True, fill_opacity=0.4
+        ).add_to(m)
+
+    pct_uncovered = len(uncovered) / max(len(pop_docs), 1) * 100
+    legend = f"""
+    <div style='position:fixed;bottom:30px;left:30px;z-index:1000;
+                background:#1a1a2e;color:white;padding:12px 16px;border-radius:8px;
+                box-shadow:0 2px 8px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px'>
+      <b>Q2 — True Uncovered Settlements</b><br>
+      <span style='color:#e74c3c'>●</span> No coverage within {radius_km}km — {len(uncovered):,} settlements ({pct_uncovered:.1f}%)<br>
+      <span style='color:#2ecc71'>●</span> Covered — {len(covered):,} settlements<br>
+      <span style='color:#2ecc71'>▬</span> Coverage footprint (union of all buffers)
+    </div>"""
+    m.get_root().html.add_child(folium.Element(legend))
+
+    m.save("q2_uncovered_settlements.html")
+    print(f"  Covered: {len(covered):,}  |  Uncovered: {len(uncovered):,}  ({pct_uncovered:.1f}%)")
+    print("  ✅ Saved: q2_uncovered_settlements.html")
+    return covered, uncovered
+
+
+
+if __name__ == "__main__":
+    query2_uncovered_settlements()
