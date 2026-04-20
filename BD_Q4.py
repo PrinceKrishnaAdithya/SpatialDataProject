@@ -11,7 +11,7 @@ import json, math
 # ─────────────────────────────────────────────
 #  CONNECTION
 # ─────────────────────────────────────────────
-MONGO_URI = "mongodb+srv://princekrishnaadi_db_user:lr41c9iGRoOX8vnk@telecomcluster.rzvshu0.mongodb.net/?retryWrites=true&w=majority"
+MONGO_URI = "your_mongo_uri"
 client = MongoClient(MONGO_URI)
 db = client["MongoDB"]
 
